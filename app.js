@@ -240,7 +240,7 @@ function viewHome() {
     {
       ico: '◈',
       main: '开始一篇',
-      sub: '通读全文 → 抓主旨 → 5 题连做 → 结算',
+      sub: '通读全文 → 四步抓主旨 → 5 题连做 → 结算',
       on: () => {
         pickPaper()
         viewPassage()
@@ -257,6 +257,12 @@ function viewHome() {
       main: '三条能力',
       sub: '判题型 / 定段位 / 排错项',
       on: viewStats,
+    },
+    {
+      ico: '✦',
+      main: 'AI 教练',
+      sub: aiReady() ? '已接好，做题时可以问' : '还没接，点这里填 API Key',
+      on: viewSettings,
     },
   ]
 
@@ -280,6 +286,11 @@ function viewHome() {
 function viewPassage() {
   S.view = 'passage'
   const p = S.paper
+  S.miStep = 0 // 主旨四步，0 = 还没开始
+  S.miHistory = []
+  S.miNotes = { 1: '', 2: '', 3: '', 4: '' }
+  S.miJudge = ''
+
   $('#btnBack').hidden = false
   $('#btnBack').onclick = () => {
     if (confirm('这一篇还没开始做，回首页？')) viewHome()
@@ -297,37 +308,234 @@ function viewPassage() {
     <div class="step-tip-num">1</div>
     <div>
       <div class="step-tip-title">先通读，别做题</div>
-      <div class="step-tip-sub">读完在下面写一句主旨。写完才开始做题。</div>
+      <div class="step-tip-sub">读完跟着下面的四步走，走完再写主旨。</div>
     </div>
   `
   app.appendChild(tip)
 
   // 全文
   const card = el('div', 'card passage-card')
+  card.id = 'passageCard'
   for (const para of p.paragraphs) {
     const row = el('div', 'passage-para')
+    row.dataset.para = para.n
     row.innerHTML = `<span class="passage-no">${para.n}</span><span class="passage-txt">${esc(para.text)}</span>`
     card.appendChild(row)
   }
   app.appendChild(card)
 
-  // 主旨输入
+  // 四步引导区
+  const guide = el('div')
+  guide.id = 'miGuide'
+  app.appendChild(guide)
+
+  renderMainIdeaGuide()
+}
+
+// ── 主旨四步 ──────────────────────────────────────────────
+const MI_STEPS = [
+  {
+    n: 1,
+    title: '看首段和末段',
+    method: '作者把结论放在这两处。先只看 P1 和最后一段，别管中间。',
+    question: '这两段在谈什么对象、什么事？用你自己的话讲。',
+    hint: '找这两段里反复出现的名词——那就是话题。',
+  },
+  {
+    n: 2,
+    title: '看每段第一句',
+    method: '段落主题句八成在第一句。扫一遍每段开头，看文章怎么推进。',
+    question: '挑三段，各用一句话说它在干什么（举例？反驳？下结论？）',
+    hint: '别抄原文，用自己的话说段落"在做什么"。',
+  },
+  {
+    n: 3,
+    title: '找转折词',
+    method: 'but / however / yet / in fact / actually 后面才是作者真意。前面多半是别人的观点。',
+    question: '原文里有几个转折？转折后面讲了什么？',
+    hint: '转折句往往就是主旨句。找到它你就抓到了七成。',
+  },
+  {
+    n: 4,
+    title: '看作者态度',
+    method: '作者是支持、批评、担忧，还是中立？态度词通常藏在形容词和副词里。',
+    question: '作者对这个话题什么态度？给一个理由。',
+    hint: '看有没有 "should" / "unfortunately" / "rightly" 这类词。',
+  },
+]
+
+function renderMainIdeaGuide() {
+  const zone = $('#miGuide')
+  if (!zone) return
+  zone.innerHTML = ''
+  const step = S.miStep
+
+  // 已完成的步骤回看
+  for (let i = 1; i <= Math.min(step, 4); i++) {
+    const done = el('div', 'mi-done')
+    done.innerHTML = `
+      <span class="mi-done-mark">✓</span>
+      <div>
+        <div class="mi-done-title">第 ${i} 步 · ${MI_STEPS[i - 1].title}</div>
+        <div class="mi-done-said">${esc(S.miNotes[i] || '（跳过了）')}</div>
+      </div>
+    `
+    zone.appendChild(done)
+  }
+
+  // 当前步
+  if (step < 4) {
+    const cur = MI_STEPS[step]
+    const card = el('div', 'card mi-card')
+    card.innerHTML = `
+      <div class="mi-head">
+        <span class="mi-step">第 ${cur.n} 步 / 4</span>
+        <span class="mi-title">${cur.title}</span>
+      </div>
+      <div class="mi-method">${cur.method}</div>
+      <div class="mi-q">${cur.question}</div>
+    `
+
+    const ta = el('textarea')
+    ta.className = 'idea-input'
+    ta.rows = 2
+    ta.placeholder = '用你自己的话说…'
+    card.appendChild(ta)
+
+    const row = el('div', 'mi-actions')
+
+    const next = el('button', 'btn btn-primary')
+    next.textContent = step === 3 ? '写主旨 →' : '下一步 →'
+    next.disabled = true
+    ta.oninput = () => {
+      next.disabled = ta.value.trim().length < 2
+    }
+
+    const hint = el('button', 'btn btn-ghost')
+    hint.textContent = '给个提示'
+    hint.onclick = () => {
+      const h = el('div', 'mi-hint')
+      h.textContent = '提示：' + cur.hint
+      card.insertBefore(h, row)
+      hint.disabled = true
+    }
+
+    const askAi = el('button', 'btn btn-ghost')
+    askAi.textContent = '问教练'
+    askAi.onclick = () => {
+      if (!aiReady()) {
+        const h = el('div', 'mi-hint')
+        h.textContent = '还没配 AI。去设定页填 API Key 就能问。'
+        card.insertBefore(h, row)
+        return
+      }
+      runAiMainIdea(step, ta.value.trim(), card)
+    }
+
+    next.onclick = () => {
+      S.miNotes[cur.n] = ta.value.trim()
+      S.miStep = step + 1
+      renderMainIdeaGuide()
+      // 滚动到新步骤
+      setTimeout(() => {
+        const g = $('#miGuide')
+        if (g) g.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      }, 60)
+    }
+
+    row.appendChild(next)
+    row.appendChild(hint)
+    row.appendChild(askAi)
+    card.appendChild(row)
+    zone.appendChild(card)
+  } else {
+    // 四步走完 → 写主旨
+    renderIdeaInput(zone)
+  }
+}
+
+async function runAiMainIdea(step, said, card) {
+  const box = el('div', 'mi-ai')
+  box.textContent = '教练正在想…'
+  card.appendChild(box)
+  box.scrollIntoView({ block: 'center', behavior: 'smooth' })
+
+  try {
+    let full = ''
+    const h = S.miHistory || []
+    if (said) h.push({ role: 'user', content: said })
+    await aiTeachMainIdea(S.paper, step + 1, said, h, (d, acc) => {
+      full = acc
+      box.textContent = acc
+    })
+    h.push({ role: 'assistant', content: full })
+    S.miHistory = h
+  } catch (e) {
+    box.textContent = '出错了：' + e.message
+  }
+}
+
+function renderIdeaInput(zone) {
   const ideaBox = el('div', 'card idea-card')
-  ideaBox.appendChild(el('h3', 'h-sec', '这篇文章在说什么？（一句话）'))
+  ideaBox.appendChild(el('h3', 'h-sec', '现在，一句话写出主旨'))
+
+  // 把四步笔记摆出来，方便他合成
+  const notes = el('div', 'mi-notes')
+  for (let i = 1; i <= 4; i++) {
+    if (!S.miNotes[i]) continue
+    const n = el('div', 'mi-note')
+    n.innerHTML = `<span class="mi-note-k">${MI_STEPS[i - 1].title}</span><span class="mi-note-v">${esc(S.miNotes[i])}</span>`
+    notes.appendChild(n)
+  }
+  ideaBox.appendChild(notes)
+
   const ta = el('textarea')
   ta.className = 'idea-input'
   ta.rows = 3
   ta.placeholder = '例：作者认为自动化让中产受损，政策却没跟上。'
   ta.value = S.mainIdea || ''
+
+  const btn = el('button', 'btn btn-primary btn-block mt-14')
+  btn.textContent = '开始做题 →'
+  btn.disabled = (S.mainIdea || '').trim().length < 6
+
   ta.oninput = () => {
     S.mainIdea = ta.value
     btn.disabled = ta.value.trim().length < 6
   }
   ideaBox.appendChild(ta)
 
-  const btn = el('button', 'btn btn-primary btn-block mt-14')
-  btn.textContent = '开始做题 →'
-  btn.disabled = (S.mainIdea || '').trim().length < 6
+  // 让 AI 判一下（可选）
+  const judgeRow = el('div', 'mi-actions')
+  const judgeBtn = el('button', 'btn btn-ghost')
+  judgeBtn.textContent = '让教练看看我写的'
+  judgeBtn.onclick = async () => {
+    if (!aiReady()) {
+      const h = el('div', 'mi-hint')
+      h.textContent = '还没配 AI。去设定页填 API Key。'
+      ideaBox.insertBefore(h, judgeRow)
+      return
+    }
+    const idea = ta.value.trim()
+    if (idea.length < 6) return
+    const box = el('div', 'mi-ai')
+    box.textContent = '教练正在看…'
+    ideaBox.insertBefore(box, judgeRow)
+    box.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    try {
+      let full = ''
+      await aiJudgeMainIdea(S.paper, idea, (d, acc) => {
+        full = acc
+        box.textContent = acc
+      })
+      S.miJudge = full
+    } catch (e) {
+      box.textContent = '出错了：' + e.message
+    }
+  }
+  judgeRow.appendChild(judgeBtn)
+  ideaBox.appendChild(judgeRow)
+
   btn.onclick = () => {
     S.mainIdea = ta.value.trim()
     startQuiz()
@@ -336,7 +544,7 @@ function viewPassage() {
   ideaBox.appendChild(
     el('div', 'tiny mt-8', '写不出来就写"没读懂"——那也是一个诚实的判断。')
   )
-  app.appendChild(ideaBox)
+  zone.appendChild(ideaBox)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -361,6 +569,7 @@ function viewQuiz() {
   S.gate1FirstTry = false
   S.gate2Missed = false
   S.gate2FirstTry = false
+  S.aiHistory = []
 
   $('#btnBack').hidden = false
   $('#btnBack').onclick = () => {
@@ -383,6 +592,12 @@ function viewQuiz() {
   }
   app.appendChild(prog)
 
+  // 看原文按钮 —— 做题时随时能回原文，这是硬需求
+  const passageBtn = el('button', 'passage-peek')
+  passageBtn.innerHTML = `<span class="peek-ico">▤</span><span>看原文</span>`
+  passageBtn.onclick = () => openPassageDrawer()
+  app.appendChild(passageBtn)
+
   // 题干
   const stem = el('p', 'stem')
   stem.textContent = `${q.num}. ${q.stem}`
@@ -404,14 +619,184 @@ function viewQuiz() {
   hintZone.id = 'hintZone'
   app.appendChild(hintZone)
 
-  // 提示按钮（始终可见）
-  const hintBtn = el('button', 'btn btn-ghost btn-block mt-14')
-  hintBtn.id = 'hintBtn'
-  hintBtn.textContent = '卡住了？要一格提示'
+  // 底部两个入口：提示 / 问教练
+  const tools = el('div', 'quiz-tools')
+
+  const hintBtn = el('button', 'tool-btn')
+  hintBtn.innerHTML = `<span class="tool-ico">?</span><span>规则提示</span>`
   hintBtn.onclick = () => useHint()
-  app.appendChild(hintBtn)
+  tools.appendChild(hintBtn)
+
+  const aiBtn = el('button', 'tool-btn tool-btn-ai')
+  aiBtn.innerHTML = `<span class="tool-ico">✦</span><span>问教练</span>`
+  aiBtn.onclick = () => openCoach()
+  tools.appendChild(aiBtn)
+
+  app.appendChild(tools)
 
   askGate1()
+}
+
+// ═══════════════════════════════════════════════════════════
+// 原文抽屉：从底部滑上来，定位后可高亮某段
+// ═══════════════════════════════════════════════════════════
+
+function openPassageDrawer(highlightPara) {
+  const p = S.paper
+  const old = $('#drawer')
+  if (old) old.remove()
+
+  const d = el('div', 'drawer')
+  d.id = 'drawer'
+  d.innerHTML = `
+    <div class="drawer-mask"></div>
+    <div class="drawer-panel">
+      <div class="drawer-grip"></div>
+      <div class="drawer-head">
+        <span class="drawer-title">${esc(paperName(p))}</span>
+        <button class="drawer-close" aria-label="收起">收起</button>
+      </div>
+      <div class="drawer-body"></div>
+    </div>
+  `
+  const body = $('.drawer-body', d)
+  for (const para of p.paragraphs) {
+    const row = el('div', 'drawer-para')
+    row.dataset.para = para.n
+    if (highlightPara === para.n) row.classList.add('is-hit')
+    row.innerHTML = `<span class="drawer-no">${para.n}</span><span class="drawer-txt">${esc(para.text)}</span>`
+    body.appendChild(row)
+  }
+
+  document.body.appendChild(d)
+  document.body.style.overflow = 'hidden'
+  requestAnimationFrame(() => d.classList.add('open'))
+
+  const close = () => {
+    d.classList.remove('open')
+    document.body.style.overflow = ''
+    setTimeout(() => d.remove(), 260)
+  }
+  $('.drawer-mask', d).onclick = close
+  $('.drawer-close', d).onclick = close
+
+  if (highlightPara) {
+    setTimeout(() => {
+      const hit = $(`.drawer-para[data-para="${highlightPara}"]`, d)
+      if (hit) hit.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }, 280)
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// AI 教练面板（引导模式：模型拿不到答案）
+// ═══════════════════════════════════════════════════════════
+
+function openCoach() {
+  if (!aiReady()) {
+    ZHOU.say('还没配 AI。去设定页填一个 API Key，就能问我了。', [
+      { label: '去设定', primary: true, on: () => viewSettings() },
+      { label: '先不用', quiet: true, on: () => renderZhouForGate() },
+    ])
+    return
+  }
+
+  const q = curQ()
+  const old = $('#coach')
+  if (old) old.remove()
+
+  const c = el('div', 'coach')
+  c.id = 'coach'
+  c.innerHTML = `
+    <div class="coach-mask"></div>
+    <div class="coach-panel">
+      <div class="coach-head">
+        <span class="coach-title">教练</span>
+        <button class="drawer-close" id="coachClose">收起</button>
+      </div>
+      <div class="coach-log" id="coachLog"></div>
+      <div class="coach-input">
+        <textarea id="coachInput" rows="2" placeholder="说说你现在卡在哪，或者你的想法…"></textarea>
+        <button class="coach-send" id="coachSend">问</button>
+      </div>
+      <div class="coach-tip">教练只引导，不给答案。答案得你自己找。</div>
+    </div>
+  `
+  document.body.appendChild(c)
+  document.body.style.overflow = 'hidden'
+  requestAnimationFrame(() => c.classList.add('open'))
+
+  const close = () => {
+    c.classList.remove('open')
+    document.body.style.overflow = ''
+    setTimeout(() => c.remove(), 260)
+  }
+  $('.coach-mask', c).onclick = close
+  $('#coachClose').onclick = close
+
+  const log = $('#coachLog')
+  const input = $('#coachInput')
+  const sendBtn = $('#coachSend')
+
+  const addMsg = (role, text) => {
+    const m = el('div', 'coach-msg coach-' + role)
+    m.textContent = text
+    log.appendChild(m)
+    log.scrollTop = log.scrollHeight
+    return m
+  }
+
+  // 开场白：按当前关卡自动问
+  // 开场白按当前关卡给。S.gate 在进题时是 0，得跟 1/2 一起算作"还没定题型"。
+  const g = S.gate || 0
+  const opener =
+    g <= 1
+      ? '这题你先别急着看选项。它问的是什么？你判断是哪个题型，为什么这么判断？'
+      : g === 2
+      ? '题干里哪个词最能帮你在原文定位？你打算怎么找？说说你的思路。'
+      : '你已经找到依据了。先把那句话用大白话讲一遍，再看看哪个选项在说同一件事。'
+  addMsg('ai', opener)
+
+  let busy = false
+  const ask = async () => {
+    const text = input.value.trim()
+    if (!text || busy) return
+    input.value = ''
+    addMsg('me', text)
+    busy = true
+    sendBtn.disabled = true
+
+    const bubble = addMsg('ai', '')
+    bubble.classList.add('typing')
+
+    try {
+      const hist = S.aiHistory || []
+      hist.push({ role: 'user', content: text })
+      let full = ''
+      await aiGuideQuestion(S.paper, q, S.gate < 1 ? 1 : S.gate, text, hist, (delta, acc) => {
+        full = acc
+        bubble.textContent = acc
+        log.scrollTop = log.scrollHeight
+      })
+      if (!bubble.textContent) bubble.textContent = full
+      bubble.classList.remove('typing')
+      hist.push({ role: 'assistant', content: full })
+      S.aiHistory = hist
+    } catch (e) {
+      bubble.textContent = '出错了：' + e.message
+      bubble.classList.remove('typing')
+    } finally {
+      busy = false
+      sendBtn.disabled = false
+      log.scrollTop = log.scrollHeight
+    }
+  }
+
+  sendBtn.onclick = ask
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask()
+  })
+  setTimeout(() => input.focus(), 320)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -512,9 +897,13 @@ function showLocatedSentence(q) {
   const box = el('div', 'located-box')
   box.id = 'locatedZone'
   box.innerHTML = `
-    <div class="located-head">第 ${q.locate.para} 段 · 依据句</div>
+    <div class="located-head">
+      第 ${q.locate.para} 段 · 依据句
+      <button class="loc-open">看整段</button>
+    </div>
     <div class="located-text">${esc(q.locate.text)}</div>
   `
+  $('.loc-open', box).onclick = () => openPassageDrawer(q.locate.para)
   const anchor = $('#hintZone')
   if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor)
   else $('#app').appendChild(box)
@@ -1175,6 +1564,166 @@ function viewWrongs() {
 // ═══════════════════════════════════════════════════════════
 // 启动
 // ═══════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════
+// 视图：AI 设定
+// ═══════════════════════════════════════════════════════════
+
+function viewSettings() {
+  S.view = 'settings'
+  S.paper = null
+  ZHOU.hide()
+  $('#btnBack').hidden = false
+  $('#btnBack').onclick = viewHome
+  $('#barTitle').textContent = 'AI 教练'
+  $('#barRight').textContent = ''
+  window.scrollTo({ top: 0 })
+
+  const cfg = loadAIConfig()
+  const app = $('#app')
+  app.innerHTML = ''
+
+  // 说明
+  const intro = el('div', 'card')
+  intro.appendChild(el('h3', 'h-sec', '它做什么'))
+  intro.innerHTML += `
+    <div class="tiny" style="line-height:1.75">
+      · 通读后带你走四步抓主旨，每步先讲方法再问你<br>
+      · 做题卡住时给你引导，<b>但不给答案</b><br>
+      · 答完才帮你复盘
+    </div>
+  `
+  intro.appendChild(
+    el(
+      'div',
+      'tiny mt-14',
+      'Key 只存在你自己浏览器里，直接连你填的接口，不经过任何第三方。'
+    )
+  )
+  app.appendChild(intro)
+
+  // 表单
+  const form = el('div', 'card')
+  form.appendChild(el('h3', 'h-sec', '接口设置'))
+
+  const mk = (label, key, type, placeholder, hint) => {
+    const box = el('div', 'mt-14')
+    box.appendChild(el('label', 'set-label', label))
+    const input = el('input')
+    input.className = 'set-input'
+    input.type = type
+    input.placeholder = placeholder
+    input.value = cfg[key] || ''
+    box.appendChild(input)
+    if (hint) box.appendChild(el('div', 'tiny mt-8', hint))
+    return { box, input, key }
+  }
+
+  const fUrl = mk(
+    'Base URL',
+    'baseUrl',
+    'text',
+    'https://api.openai.com/v1',
+    'OpenAI 兼容接口。中转站就填它的地址，末尾不要带 /chat/completions。'
+  )
+  const fKey = mk('API Key', 'apiKey', 'password', 'sk-…', '只存本地。')
+  const fModel = mk(
+    '模型',
+    'model',
+    'text',
+    'gpt-4o-mini',
+    '填接口支持的模型名。'
+  )
+
+  for (const f of [fUrl, fKey, fModel]) form.appendChild(f.box)
+  app.appendChild(form)
+
+  // 开关
+  const sw = el('div', 'card')
+  const swRow = el('div', 'row-between')
+  swRow.innerHTML = `
+    <div>
+      <div style="font-size:15px;font-weight:600">启用 AI 教练</div>
+      <div class="tiny mt-8">关掉就只用本地规则提示，功能不受影响</div>
+    </div>
+  `
+  const toggle = el('button', 'switch' + (cfg.enabled ? ' on' : ''))
+  toggle.innerHTML = '<span class="switch-dot"></span>'
+  toggle.onclick = () => {
+    cfg.enabled = !cfg.enabled
+    toggle.classList.toggle('on', cfg.enabled)
+  }
+  swRow.appendChild(toggle)
+  sw.appendChild(swRow)
+  app.appendChild(sw)
+
+  // 按钮
+  const acts = el('div', 'mt-20')
+
+  const save = el('button', 'btn btn-primary btn-block')
+  save.textContent = '保存'
+  save.onclick = () => {
+    const next = {
+      ...cfg,
+      baseUrl: fUrl.input.value.trim() || AI_DEFAULT.baseUrl,
+      apiKey: fKey.input.value.trim(),
+      model: fModel.input.value.trim() || AI_DEFAULT.model,
+    }
+    // toggle 的当前状态
+    next.enabled = toggle.classList.contains('on')
+    saveAIConfig(next)
+    toast('已保存')
+  }
+  acts.appendChild(save)
+
+  const test = el('button', 'btn btn-block mt-8')
+  test.textContent = '测试连通'
+  test.onclick = async () => {
+    // 先存再用
+    const next = {
+      ...cfg,
+      baseUrl: fUrl.input.value.trim() || AI_DEFAULT.baseUrl,
+      apiKey: fKey.input.value.trim(),
+      model: fModel.input.value.trim() || AI_DEFAULT.model,
+      enabled: true,
+    }
+    saveAIConfig(next)
+    test.disabled = true
+    test.textContent = '测试中…'
+    try {
+      const r = await aiPing()
+      test.textContent = '通了：' + r.slice(0, 20)
+      test.style.borderColor = 'var(--ok)'
+      test.style.color = 'var(--ok)'
+    } catch (e) {
+      test.textContent = '失败'
+      test.style.borderColor = 'var(--bad)'
+      test.style.color = 'var(--bad)'
+      const msg = el('div', 'tiny mt-14')
+      msg.style.color = 'var(--bad)'
+      msg.style.lineHeight = '1.7'
+      msg.textContent = e.message
+      acts.appendChild(msg)
+    } finally {
+      test.disabled = false
+    }
+  }
+  acts.appendChild(test)
+
+  app.appendChild(acts)
+
+  // 常见问题
+  const faq = el('div', 'card mt-20')
+  faq.appendChild(el('h3', 'h-sec', '接口报 CORS 怎么办'))
+  faq.appendChild(
+    el(
+      'div',
+      'tiny',
+      '浏览器直连要求接口允许跨域。OpenAI 官方、多数中转站都允许。如果报 CORS，换成允许跨域的接口地址。'
+    )
+  )
+  app.appendChild(faq)
+}
 
 async function boot() {
   STORE = loadStore()
