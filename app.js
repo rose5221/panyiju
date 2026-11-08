@@ -1587,9 +1587,9 @@ function viewSettings() {
   const intro = el('div', 'card')
   intro.appendChild(el('h3', 'h-sec', '它做什么'))
   intro.innerHTML += `
-    <div class="tiny" style="line-height:1.75">
+    <div class="tiny" style="line-height:1.8">
       · 通读后带你走四步抓主旨，每步先讲方法再问你<br>
-      · 做题卡住时给你引导，<b>但不给答案</b><br>
+      · 做题卡住时给你引导，<b style="color:var(--ink)">但不给答案</b><br>
       · 答完才帮你复盘
     </div>
   `
@@ -1597,10 +1597,32 @@ function viewSettings() {
     el(
       'div',
       'tiny mt-14',
-      'Key 只存在你自己浏览器里，直接连你填的接口，不经过任何第三方。'
+      'Key 只存在你自己浏览器里，直接连你填的接口。不经过我这里，也没有任何中转。'
     )
   )
   app.appendChild(intro)
+
+  // 预设
+  const presetCard = el('div', 'card')
+  presetCard.appendChild(el('h3', 'h-sec', '选一个'))
+  const presetRow = el('div', 'preset-row')
+  for (const pr of AI_PRESETS) {
+    const isDeep = pr.id === 'deepseek'
+    const b = el('button', 'preset-btn' + (isDeep ? ' preset-main' : ''))
+    b.innerHTML = `
+      <span class="preset-name">${pr.name}${isDeep ? ' <span class="preset-tag">推荐</span>' : ''}</span>
+      <span class="preset-note">${pr.note}</span>
+    `
+    b.onclick = () => {
+      fUrl.input.value = pr.baseUrl
+      fModel.input.value = pr.models[0]
+      // 模型下拉也跟着换
+      renderModelOptions(pr.models, pr.models[0])
+    }
+    presetRow.appendChild(b)
+  }
+  presetCard.appendChild(presetRow)
+  app.appendChild(presetCard)
 
   // 表单
   const form = el('div', 'card')
@@ -1620,22 +1642,74 @@ function viewSettings() {
   }
 
   const fUrl = mk(
-    'Base URL',
+    '接口地址',
     'baseUrl',
     'text',
-    'https://api.openai.com/v1',
-    'OpenAI 兼容接口。中转站就填它的地址，末尾不要带 /chat/completions。'
+    'https://api.deepseek.com',
+    '末尾不用带 /chat/completions，带了也认。'
   )
-  const fKey = mk('API Key', 'apiKey', 'password', 'sk-…', '只存本地。')
-  const fModel = mk(
-    '模型',
-    'model',
-    'text',
-    'gpt-4o-mini',
-    '填接口支持的模型名。'
+  const fKey = mk(
+    'API Key',
+    'apiKey',
+    'password',
+    'sk-…',
+    '去 platform.deepseek.com 申请。只存在你这台设备上。'
   )
 
-  for (const f of [fUrl, fKey, fModel]) form.appendChild(f.box)
+  // 模型：下拉 + 可手填
+  const modelBox = el('div', 'mt-14')
+  modelBox.appendChild(el('label', 'set-label', '模型'))
+  const modelSel = el('select')
+  modelSel.className = 'set-input set-select'
+  modelBox.appendChild(modelSel)
+  const modelFree = el('input')
+  modelFree.className = 'set-input mt-8'
+  modelFree.type = 'text'
+  modelFree.placeholder = '或者手填模型名'
+  modelFree.value = cfg.model || ''
+  modelFree.style.display = 'none'
+  modelBox.appendChild(modelFree)
+
+  const toggleFree = el('button', 'set-link')
+  toggleFree.textContent = '手动填模型名'
+  toggleFree.onclick = () => {
+    const showing = modelFree.style.display !== 'none'
+    modelFree.style.display = showing ? 'none' : 'block'
+    toggleFree.textContent = showing ? '手动填模型名' : '收回，用下拉'
+  }
+  modelBox.appendChild(toggleFree)
+
+  function renderModelOptions(models, current) {
+    modelSel.innerHTML = ''
+    for (const m of models) {
+      const o = el('option')
+      o.value = m
+      o.textContent = m
+      if (m === current) o.selected = true
+      modelSel.appendChild(o)
+    }
+    modelFree.value = current || models[0]
+  }
+
+  // 初始：按当前 baseUrl 猜预设
+  const guess = AI_PRESETS.find((p) => p.baseUrl === cfg.baseUrl) || AI_PRESETS[0]
+  renderModelOptions(guess.models, cfg.model || guess.models[0])
+  if (!guess.models.includes(cfg.model)) {
+    modelFree.style.display = 'block'
+    modelFree.value = cfg.model || ''
+  }
+  modelSel.onchange = () => {
+    modelFree.value = modelSel.value
+  }
+
+  for (const f of [fUrl, fKey]) form.appendChild(f.box)
+  form.appendChild(modelBox)
+
+  // 取当前生效的模型
+  const currentModel = () =>
+    (modelFree.style.display !== 'none' ? modelFree.value : modelSel.value).trim() ||
+    AI_DEFAULT.model
+
   app.appendChild(form)
 
   // 开关
@@ -1644,7 +1718,7 @@ function viewSettings() {
   swRow.innerHTML = `
     <div>
       <div style="font-size:15px;font-weight:600">启用 AI 教练</div>
-      <div class="tiny mt-8">关掉就只用本地规则提示，功能不受影响</div>
+      <div class="tiny mt-8">关掉就只用本地规则提示，其他功能照常</div>
     </div>
   `
   const toggle = el('button', 'switch' + (cfg.enabled ? ' on' : ''))
@@ -1652,6 +1726,12 @@ function viewSettings() {
   toggle.onclick = () => {
     cfg.enabled = !cfg.enabled
     toggle.classList.toggle('on', cfg.enabled)
+    // 立刻存，避免用户以为开了其实没存
+    saveAIConfig({
+      ...loadAIConfig(),
+      enabled: toggle.classList.contains('on'),
+    })
+    toast(toggle.classList.contains('on') ? 'AI 已启用' : 'AI 已关闭')
   }
   swRow.appendChild(toggle)
   sw.appendChild(swRow)
@@ -1667,10 +1747,9 @@ function viewSettings() {
       ...cfg,
       baseUrl: fUrl.input.value.trim() || AI_DEFAULT.baseUrl,
       apiKey: fKey.input.value.trim(),
-      model: fModel.input.value.trim() || AI_DEFAULT.model,
+      model: currentModel(),
+      enabled: toggle.classList.contains('on'),
     }
-    // toggle 的当前状态
-    next.enabled = toggle.classList.contains('on')
     saveAIConfig(next)
     toast('已保存')
   }
@@ -1679,27 +1758,34 @@ function viewSettings() {
   const test = el('button', 'btn btn-block mt-8')
   test.textContent = '测试连通'
   test.onclick = async () => {
-    // 先存再用
     const next = {
       ...cfg,
       baseUrl: fUrl.input.value.trim() || AI_DEFAULT.baseUrl,
       apiKey: fKey.input.value.trim(),
-      model: fModel.input.value.trim() || AI_DEFAULT.model,
+      model: currentModel(),
       enabled: true,
+    }
+    if (!next.apiKey) {
+      toast('先填 API Key')
+      return
     }
     saveAIConfig(next)
     test.disabled = true
     test.textContent = '测试中…'
+    test.style.color = ''
+    test.style.borderColor = ''
     try {
       const r = await aiPing()
-      test.textContent = '通了：' + r.slice(0, 20)
+      test.textContent = '通了 · ' + r.slice(0, 16)
       test.style.borderColor = 'var(--ok)'
       test.style.color = 'var(--ok)'
     } catch (e) {
-      test.textContent = '失败'
+      test.textContent = '没通'
       test.style.borderColor = 'var(--bad)'
       test.style.color = 'var(--bad)'
-      const msg = el('div', 'tiny mt-14')
+      const old = $('.set-err')
+      if (old) old.remove()
+      const msg = el('div', 'tiny mt-14 set-err')
       msg.style.color = 'var(--bad)'
       msg.style.lineHeight = '1.7'
       msg.textContent = e.message
@@ -1712,18 +1798,27 @@ function viewSettings() {
 
   app.appendChild(acts)
 
-  // 常见问题
+  // 帮助
   const faq = el('div', 'card mt-20')
-  faq.appendChild(el('h3', 'h-sec', '接口报 CORS 怎么办'))
+  faq.appendChild(el('h3', 'h-sec', '怎么拿 Key'))
+  faq.innerHTML += `
+    <div class="tiny" style="line-height:1.8">
+      1. 打开 platform.deepseek.com 注册<br>
+      2. 左侧「API keys」→ 创建<br>
+      3. 复制那串 sk- 开头的，粘上面<br>
+      4. 点「测试连通」
+    </div>
+  `
   faq.appendChild(
     el(
       'div',
-      'tiny',
-      '浏览器直连要求接口允许跨域。OpenAI 官方、多数中转站都允许。如果报 CORS，换成允许跨域的接口地址。'
+      'tiny mt-14',
+      'DeepSeek 实测允许网页直接调用，不用架服务器。如果哪天报 CORS，告诉我。'
     )
   )
   app.appendChild(faq)
 }
+
 
 async function boot() {
   STORE = loadStore()

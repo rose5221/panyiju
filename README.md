@@ -100,15 +100,40 @@
 
 只有复盘阶段（答案已公开）才把答案传给模型。
 
-### 怎么配
+### 怎么配（DeepSeek）
 
-首页 → AI 教练 → 填三项：
+首页 → AI 教练 → 默认就是 DeepSeek，只需填 Key：
 
-- **Base URL**：OpenAI 兼容接口，末尾不要带 `/chat/completions`
-- **API Key**：只存你浏览器的 localStorage
-- **模型**：接口支持的名字
+1. 去 **platform.deepseek.com** 注册
+2. 左侧「API keys」→ 创建
+3. 复制 `sk-` 开头那一整串，粘进去
+4. 点「测试连通」——通了好再打开开关
 
-点「测试连通」，通了再开开关。
+模型选 `deepseek-flash`（快、便宜）或 `deepseek-v4-pro`（更强）。
+
+地址已经填好 `https://api.deepseek.com`，末尾不用带 `/chat/completions`，带了也认。
+
+**为什么能直接在网页上调用**：我实测过 DeepSeek 的跨域响应，
+
+```
+access-control-allow-origin: https://rose5221.github.io
+access-control-allow-methods: POST
+```
+
+所以不需要架任何服务器，Key 就存在你自己浏览器里，直连 DeepSeek。
+
+也可以用 OpenAI 或任何 OpenAI 兼容的中转站，点上面的预设切换即可。
+
+### 自己验一遍提示词效果
+
+配好 Key 后，在终端跑：
+
+```bash
+DEEPSEEK_KEY=sk-你的key node tools/test-ai.mjs --full
+```
+
+会打出四段真实回复：连通、流式、主旨第 1 步、做题引导、主旨诊断。
+你直接看话术对不对味，觉得啰嗦就告诉我改。
 
 ### 抓主旨的四步
 

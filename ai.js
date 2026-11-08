@@ -10,15 +10,35 @@
 
 'use strict'
 
-const AI_CONFIG_KEY = 'panyiju.ai.v1'
+const AI_CONFIG_KEY = 'panyiju.ai.v2'
 
+// 默认接 DeepSeek。实测它允许浏览器跨域直连（OPTIONS 会回你当前 origin），
+// 所以 Key 完全留在本地，不经过任何中转。
 const AI_DEFAULT = {
   enabled: false,
-  baseUrl: 'https://api.openai.com/v1',
+  baseUrl: 'https://api.deepseek.com',
   apiKey: '',
-  model: 'gpt-4o-mini',
-  temperature: 0.5,
+  model: 'deepseek-flash',
+  temperature: 0.6,
 }
+
+// 一键切换的预设。用户改过的值不会被覆盖，只在他主动点预设时替换。
+const AI_PRESETS = [
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
+    models: ['deepseek-flash', 'deepseek-v4-pro'],
+    note: '国内直连快，支持浏览器调用',
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    baseUrl: 'https://api.openai.com/v1',
+    models: ['gpt-4o-mini', 'gpt-4o'],
+    note: '需要能访问 openai.com',
+  },
+]
 
 function loadAIConfig() {
   try {
@@ -47,7 +67,10 @@ async function aiChat(messages, onDelta, opts = {}) {
   const cfg = loadAIConfig()
   if (!cfg.apiKey) throw new Error('还没填 API Key')
 
-  const url = cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions'
+  // DeepSeek 两种都认（/v1 可带可不带），这里统一处理：
+  // 已经以 /chat/completions 结尾就直接用，否则补上。
+  let base = (cfg.baseUrl || '').trim().replace(/\/+$/, '')
+  const url = /\/chat\/completions$/.test(base) ? base : base + '/chat/completions'
   const body = {
     model: cfg.model,
     messages,
@@ -85,7 +108,7 @@ async function aiChat(messages, onDelta, opts = {}) {
     } catch {
       detail = await res.text().catch(() => '')
     }
-    throw new Error(`接口返回 ${res.status}：${detail}`)
+    throw new Error(friendlyError(res.status, detail))
   }
 
   // 非流式
@@ -249,6 +272,33 @@ async function aiGuideQuestion(paper, q, gate, said, history = [], onDelta) {
   if (said) messages.push({ role: 'user', content: `我的想法：${said}` })
 
   return aiChat(messages, onDelta, { maxTokens: 380 })
+}
+
+/* ────────────────────────────────────────────────────────────
+   错误翻译：把接口的英文报错变成能照做的话
+   ──────────────────────────────────────────────────────────── */
+
+function friendlyError(status, detail) {
+  const d = (detail || '').toLowerCase()
+  if (status === 401 || d.includes('authentication') || d.includes('invalid api key')) {
+    return 'Key 不对。检查是否复制完整（sk- 开头那一整串），或者去后台看这个 key 还在不在。'
+  }
+  if (status === 402 || d.includes('insufficient balance')) {
+    return '账户余额不够了。去 DeepSeek 后台充值。'
+  }
+  if (status === 429 || d.includes('rate limit')) {
+    return '请求太频繁。等十几秒再试。'
+  }
+  if (status === 404 || d.includes('model not found')) {
+    return '模型名不对。当前 DeepSeek 可用的是 deepseek-flash 或 deepseek-v4-pro。'
+  }
+  if (status === 400 && d.includes('model')) {
+    return '模型名不被接受。检查设定页选的模型。'
+  }
+  if (status >= 500) {
+    return '对方服务器出错（' + status + '）。稍后再试。'
+  }
+  return `接口返回 ${status}：${detail}`
 }
 
 /* ────────────────────────────────────────────────────────────
