@@ -1,19 +1,18 @@
-/* AI 教练层
+/* AI 教练层 v2
  *
- * 安全设计（改代码前必读）：
- *   引导模式下，**绝不把答案发给模型**。请求体里没有 answer 字段，
- *   所以模型物理上不可能泄露答案。这不是靠提示词约束，是靠数据结构。
- *   只有复盘阶段（答案已公开）才把 answer 传进去。
+ * 三个阶段的铁律：
+ *   ① 预测/阅读/作答阶段：模型拿不到答案（请求里没有 answer 字段）
+ *   ② 作答后说理由阶段：模型仍然拿不到答案，只能追问思路
+ *   ③ 交卷复盘阶段：答案已公开，模型拿到全部数据做深度拆解
  *
- * 配置存 localStorage，只在你自己的浏览器里，不上传任何服务器。
+ * 这个边界靠数据结构保证，不靠提示词。
  */
 
 'use strict'
 
 const AI_CONFIG_KEY = 'panyiju.ai.v2'
 
-// 默认接 DeepSeek。实测它允许浏览器跨域直连（OPTIONS 会回你当前 origin），
-// 所以 Key 完全留在本地，不经过任何中转。
+// 默认接 DeepSeek。实测它允许浏览器跨域直连，Key 完全留本地。
 const AI_DEFAULT = {
   enabled: false,
   baseUrl: 'https://api.deepseek.com',
@@ -22,7 +21,6 @@ const AI_DEFAULT = {
   temperature: 0.6,
 }
 
-// 一键切换的预设。用户改过的值不会被覆盖，只在他主动点预设时替换。
 const AI_PRESETS = [
   {
     id: 'deepseek',
@@ -59,28 +57,25 @@ function aiReady() {
   return !!(c.enabled && c.apiKey && c.baseUrl && c.model)
 }
 
-/* ────────────────────────────────────────────────────────────
-   核心请求（支持流式，打字机效果）
-   ──────────────────────────────────────────────────────────── */
+/* ── 请求 ─────────────────────────────────────────────── */
 
 async function aiChat(messages, onDelta, opts = {}) {
   const cfg = loadAIConfig()
   if (!cfg.apiKey) throw new Error('还没填 API Key')
 
-  // DeepSeek 两种都认（/v1 可带可不带），这里统一处理：
-  // 已经以 /chat/completions 结尾就直接用，否则补上。
   let base = (cfg.baseUrl || '').trim().replace(/\/+$/, '')
   const url = /\/chat\/completions$/.test(base) ? base : base + '/chat/completions'
+
   const body = {
     model: cfg.model,
     messages,
     temperature: opts.temperature ?? cfg.temperature,
-    max_tokens: opts.maxTokens ?? 700,
+    max_tokens: opts.maxTokens ?? 800,
     stream: !!onDelta,
   }
 
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), opts.timeout ?? 60000)
+  const timer = setTimeout(() => ctrl.abort(), opts.timeout ?? 90000)
 
   let res
   try {
@@ -95,8 +90,8 @@ async function aiChat(messages, onDelta, opts = {}) {
     })
   } catch (e) {
     clearTimeout(timer)
-    if (e.name === 'AbortError') throw new Error('请求超时（60 秒）')
-    throw new Error('连不上接口：' + e.message + '（可能是 CORS 或地址填错）')
+    if (e.name === 'AbortError') throw new Error('请求超时')
+    throw new Error('连不上接口：' + e.message)
   }
 
   if (!res.ok) {
@@ -111,19 +106,16 @@ async function aiChat(messages, onDelta, opts = {}) {
     throw new Error(friendlyError(res.status, detail))
   }
 
-  // 非流式
   if (!onDelta) {
     clearTimeout(timer)
     const j = await res.json()
     return j?.choices?.[0]?.message?.content?.trim() || ''
   }
 
-  // 流式
   const reader = res.body.getReader()
   const dec = new TextDecoder()
   let buf = ''
   let full = ''
-
   try {
     while (true) {
       const { done, value } = await reader.read()
@@ -134,10 +126,10 @@ async function aiChat(messages, onDelta, opts = {}) {
       for (const line of lines) {
         const t = line.trim()
         if (!t.startsWith('data:')) continue
-        const payload = t.slice(5).trim()
-        if (payload === '[DONE]') continue
+        const pl = t.slice(5).trim()
+        if (pl === '[DONE]') continue
         try {
-          const j = JSON.parse(payload)
+          const j = JSON.parse(pl)
           const d = j?.choices?.[0]?.delta?.content
           if (d) {
             full += d
@@ -149,167 +141,222 @@ async function aiChat(messages, onDelta, opts = {}) {
   } finally {
     clearTimeout(timer)
   }
-
   return full.trim()
 }
 
-/* ────────────────────────────────────────────────────────────
-   提示词
-   ──────────────────────────────────────────────────────────── */
-
-const SYS_COACH = `你是一位考研英语阅读教练，带一个目标 45-50 分的学生。
-
-你的铁律：
-1. 你只负责引导，绝不替他做题、绝不说出任何选项字母。
-2. 一次只说一件事，最多 3 句话。学生要读得下去。
-3. 先肯定他答对的部分，再指出缺口，最后给一个问题让他自己往下想。
-4. 不说"要努力""多练练"这类空话。
-5. 用中文，英文术语保留原词。
-6. 不用 markdown 列表，就写自然的话。`
-
-const SYS_MAINIDEA = `你是一位考研英语阅读教练，正在教学生抓文章主旨。
-
-抓主旨的方法（按这个顺序教）：
-一、看首段和末段——作者把结论通常放这两处。
-二、看每段第一句——段落主题句八成在第一句。
-三、找转折词（but / however / yet / in fact / actually）——转折后面才是作者真意。
-四、看态度词——作者是支持、批评、担忧还是中立。
-
-你的任务：按上面四步，一步一步带学生做这篇。每次只教一步，教完问他一个问题。
-不要一次说完四步。不要替他说出主旨。最多 3 句话。`
-
-/* ────────────────────────────────────────────────────────────
-   场景一：教找主旨（分步）
-   ──────────────────────────────────────────────────────────── */
-
-/**
- * @param {object} paper   当前文章
- * @param {number} step    第几步（1-4）
- * @param {string} said    学生这一步说的话
- * @param {Array}  history 之前的对话
- */
-async function aiTeachMainIdea(paper, step, said, history = [], onDelta) {
-  const passage = paper.paragraphs
-    .map((p) => `[P${p.n}] ${p.text}`)
-    .join('\n\n')
-
-  const stepTask = [
-    '',
-    '这是第 1 步：看首段和末段。请根据这两段，问他这篇文章在谈什么对象／话题。',
-    '这是第 2 步：看每段第一句。请让他用一句话概括每段在干什么（不用全部写完，挑 3 段就行）。',
-    '这是第 3 步：找转折词。请让他在原文里找出所有 but / however / yet / in fact，然后说说转折后面讲了什么。',
-    '这是第 4 步：看态度。请让他判断作者对这个话题是支持、批评、担忧还是中立，并给出理由。',
-  ][step]
-
-  const messages = [
-    { role: 'system', content: SYS_MAINIDEA },
-    {
-      role: 'user',
-      content: `文章（${paper.year} 英语一阅读 ${paper.part}）：\n\n${passage}\n\n${stepTask}`,
-    },
-    ...history.slice(-6),
-  ]
-
-  if (said) {
-    messages.push({ role: 'user', content: `我的回答：${said}` })
-  }
-
-  return aiChat(messages, onDelta, { maxTokens: 450 })
-}
-
-/**
- * 最后一步：评估他写的主旨，只诊断，不给范文
- */
-async function aiJudgeMainIdea(paper, idea, onDelta) {
-  const passage = paper.paragraphs.map((p) => `[P${p.n}] ${p.text}`).join('\n\n')
-
-  const messages = [
-    { role: 'system', content: SYS_COACH },
-    {
-      role: 'user',
-      content: `文章：\n${passage}\n\n学生写的主旨：「${idea}」
-
-请判断三件事，一次说完：
-1. 他抓到的核心是什么？对不对？（对就说对在哪）
-2. 他漏了什么？指到具体第几段。
-3. 如果他偏了，问题出在哪一步（只看了局部／被某个例子带跑／把例子当主旨／态度读反了）。
-
-不要写一段正确的范文给他抄。最多 4 句话。`,
-    },
-  ]
-  return aiChat(messages, onDelta, { maxTokens: 400 })
-}
-
-/* ────────────────────────────────────────────────────────────
-   场景二：做题时引导
-   ⚠️ 这里构造的请求体里没有 answer 字段，模型拿不到答案。
-   ──────────────────────────────────────────────────────────── */
-
-async function aiGuideQuestion(paper, q, gate, said, history = [], onDelta) {
-  const passage = paper.paragraphs.map((p) => `[P${p.n}] ${p.text}`).join('\n\n')
-
-  // 故意不传 q.answer / q.distractors / q.pairs
-  const options = ['A', 'B', 'C', 'D']
-    .map((L) => `${L}. ${q.options[L]}`)
-    .join('\n')
-
-  const gateTask =
-    gate === 1
-      ? '他正在判断题型。别告诉他答案，引导他看题干动词和选项形态。'
-      : gate === 2
-      ? '他正在定位。别告诉他第几段，引导他从题干关键词去原文找。'
-      : '他正在选答案。别告诉他哪个对。引导他把定位句改写成大白话，再逐项比对。'
-
-  const messages = [
-    { role: 'system', content: SYS_COACH },
-    {
-      role: 'user',
-      content: `文章：\n${passage}\n\n题目（第 ${q.num} 题）：${q.stem}\n\n选项：\n${options}\n\n${gateTask}`,
-    },
-    ...history.slice(-6),
-  ]
-
-  if (said) messages.push({ role: 'user', content: `我的想法：${said}` })
-
-  return aiChat(messages, onDelta, { maxTokens: 380 })
-}
-
-/* ────────────────────────────────────────────────────────────
-   错误翻译：把接口的英文报错变成能照做的话
-   ──────────────────────────────────────────────────────────── */
-
 function friendlyError(status, detail) {
   const d = (detail || '').toLowerCase()
-  if (status === 401 || d.includes('authentication') || d.includes('invalid api key')) {
-    return 'Key 不对。检查是否复制完整（sk- 开头那一整串），或者去后台看这个 key 还在不在。'
-  }
-  if (status === 402 || d.includes('insufficient balance')) {
+  if (status === 401 || d.includes('authentication') || d.includes('invalid api key'))
+    return 'Key 不对。检查是否复制完整（sk- 开头那一整串）。'
+  if (status === 402 || d.includes('insufficient balance'))
     return '账户余额不够了。去 DeepSeek 后台充值。'
-  }
-  if (status === 429 || d.includes('rate limit')) {
-    return '请求太频繁。等十几秒再试。'
-  }
-  if (status === 404 || d.includes('model not found')) {
-    return '模型名不对。当前 DeepSeek 可用的是 deepseek-flash 或 deepseek-v4-pro。'
-  }
-  if (status === 400 && d.includes('model')) {
-    return '模型名不被接受。检查设定页选的模型。'
-  }
-  if (status >= 500) {
-    return '对方服务器出错（' + status + '）。稍后再试。'
-  }
+  if (status === 429 || d.includes('rate limit')) return '请求太频繁，等十几秒再试。'
+  if (status === 404 || d.includes('model not found'))
+    return '模型名不对。可用 deepseek-flash 或 deepseek-v4-pro。'
+  if (status >= 500) return `对方服务器出错（${status}），稍后再试。`
   return `接口返回 ${status}：${detail}`
 }
 
-/* ────────────────────────────────────────────────────────────
-   连通性测试
-   ──────────────────────────────────────────────────────────── */
+/* ── 通用人格 ─────────────────────────────────────────── */
+
+const SYS_COACH = `你是考研英语阅读教练，带一个目标 45-50 分的学生。你的风格像老练的阅卷老师，话直接、不客套。
+
+铁律：
+1. 作答阶段你只引导，绝不说出任何选项字母，绝不说"选 X 对"。
+2. 一次只说一件事，最多 3 句话。
+3. 学生说错了不要安慰式开场，直接指出缺口在哪，再给一个问题。
+4. 不说"要努力""多练练"这类空话。
+5. 用中文，英文术语保留原词。
+6. 不用 markdown 列表符号，用自然段落。`
+
+/* ══════════════════════════════════════════════════════
+   阶段一：只看题干，预测文章讲什么
+   ══════════════════════════════════════════════════════ */
+
+/**
+ * 用 5 个题干推断话题。这是"先看题再读文"的关键一步。
+ * 注意：不传选项内容，不传答案，只传题干。
+ */
+async function aiPredictTopic(paper, step, said, history = [], onDelta) {
+  const stems = paper.questions.map((q) => `${q.num}. ${q.stem}`).join('\n')
+
+  const stepTask = [
+    '',
+    '这是第 1 步。让学生看这 5 个题干里的重复名词和专有名词，说出这篇文章大概在讨论什么话题。问他一个问题就好。',
+    '这是第 2 步。让学生从题干里找"作者态度"的线索（问 opinion / attitude / author believes 的题），推断作者倾向。问他一个问题。',
+    '这是第 3 步。让学生把这 5 个题干串成一句话：这篇文章按什么顺序展开（现象→原因→对策？还是观点→反驳？）。问他一个问题。',
+  ][step]
+
+  const messages = [
+    {
+      role: 'system',
+      content:
+        SYS_COACH +
+        '\n现在是"只看题干猜主旨"阶段。你手里只有题干，没有文章，绝对不要假装知道文章内容，也不要编造具体细节。',
+    },
+    {
+      role: 'user',
+      content: `这是一篇考研英语一阅读的 5 个题干（${paper.year} 年，第 ${paper.part} 篇）：\n\n${stems}\n\n${stepTask}`,
+    },
+    ...history.slice(-6),
+  ]
+  if (said) messages.push({ role: 'user', content: `我的回答：${said}` })
+
+  return aiChat(messages, onDelta, { maxTokens: 400 })
+}
+
+/** 学生写完"猜的主旨"后，让他先说，AI 只做诊断，不给答案（因为文章还没读） */
+async function aiJudgeGuess(paper, guess, onDelta) {
+  const stems = paper.questions.map((q) => `${q.num}. ${q.stem}`).join('\n')
+  const messages = [
+    {
+      role: 'system',
+      content:
+        SYS_COACH +
+        '\n学生还没读文章，只看了题干就猜了主旨。你要判断这个猜测是否从题干里合理推得，而不是判断它对不对——你也不知道对不对。',
+    },
+    {
+      role: 'user',
+      content: `题干：\n${stems}\n\n学生从题干推测的主旨：「${guess}」\n\n请说两件事：一、他这个推测是从题干里的哪些词推出来的（指出来）。二、读文章时他该重点验证什么。不超过 3 句话。`,
+    },
+  ]
+  return aiChat(messages, onDelta, { maxTokens: 350 })
+}
+
+/* ══════════════════════════════════════════════════════
+   阶段二：作答后说理由，AI 追问
+   ⚠️ 这里绝不传 answer / distractors / pairs
+   ══════════════════════════════════════════════════════ */
+
+async function aiChallengeReason(paper, q, picked, reason, history = [], onDelta) {
+  const passage = paper.paragraphs.map((p) => `[P${p.n}] ${p.text}`).join('\n\n')
+  const options = ['A', 'B', 'C', 'D'].map((L) => `${L}. ${q.options[L]}`).join('\n')
+
+  const messages = [
+    {
+      role: 'system',
+      content:
+        SYS_COACH +
+        '\n学生刚选了一个选项并给出了理由。你不知道正确答案，也不要猜哪个对。你只做一件事：检查他的理由是否站得住——他引的依据在原文里真的支持这个选项吗？有没有跳步、有没有把例子当观点。指出具体问题后，问他一个能让他自己发现问题的问题。',
+    },
+    {
+      role: 'user',
+      content: `文章：\n${passage}\n\n题目（第 ${q.num} 题）：${q.stem}\n\n选项：\n${options}\n\n学生选了 ${picked}。他的理由：「${reason}」\n\n请判断：他的理由和他在原文找到的依据之间，链条完整吗？哪一步是跳过去的？最多说 3 句话，最后留一个问题给他。`,
+    },
+    ...history.slice(-4),
+  ]
+  return aiChat(messages, onDelta, { maxTokens: 380 })
+}
+
+/* ══════════════════════════════════════════════════════
+   阶段三：交卷后深度复盘（答案已公开，可以全给）
+   ══════════════════════════════════════════════════════ */
+
+/**
+ * 单题深度拆解：出题人怎么挖坑。
+ * @param {object} q      完整题（含 answer / distractors / pairs / locate）
+ * @param {object} ans    学生作答 { letter, reason }
+ */
+async function aiDeepAnalyze(paper, q, ans, onDelta) {
+  const passage = paper.paragraphs.map((p) => `[P${p.n}] ${p.text}`).join('\n\n')
+  const options = ['A', 'B', 'C', 'D']
+    .map((L) => {
+      const tag = L === q.answer ? '【正确答案】' : `【出题人的坑：${q.distractors[L] || '未知'}】`
+      return `${L}. ${q.options[L]}  ${tag}`
+    })
+    .join('\n')
+
+  const pairs = (q.pairs || [])
+    .map((p) => `原文「${p.orig}」＝选项「${p.opt}」`)
+    .join('\n')
+  const locate = q.locate
+    ? `第 ${q.locate.para} 段：「${q.locate.text}」`
+    : '（本题为主旨/态度题，依据贯穿全文）'
+
+  const studentPick = ans?.letter || '未作答'
+  const studentReason = ans?.reason || '（没写理由）'
+
+  const messages = [
+    {
+      role: 'system',
+      content: `你是考研英语一阅读的阅卷老师，正在给一个 45 分目标的学生做逐题复盘。
+
+你的输出必须像"手术刀"，不能像流水账。禁止这样写：
+- "A 项无中生有"然后只给一句通用解释
+- 复述选项原文
+- 说"注意定位""多练"这类空话
+
+必须做到：
+1. 每个错误选项，说清出题人动了原文的哪个词、改成了什么样、专门骗哪类考生。
+2. 正确选项，给出完整的替换链：原文哪句 → 换成了选项里哪几个词。
+3. 最后判断学生的理由错在哪一步，具体到"他以为 X，其实原文是 Y"。
+
+用中文，自然段落，不要 markdown 列表符号。总长度控制在 400 字内，但每句都要有信息量。`,
+    },
+    {
+      role: 'user',
+      content: `文章：\n${passage}\n\n题目（第 ${q.num} 题，${q.qtype}）：${q.stem}\n\n选项（已标注出题人的坑）：\n${options}\n\n正确答案：${q.answer}\n\n依据句：${locate}\n\n官方替换对：\n${pairs || '（无）'}\n\n学生选了 ${studentPick}，他给的理由是：「${studentReason}」
+
+请做这件事：
+第一段，写正确答案为什么对，把替换链一步步摆出来。
+第二段，逐个说错误选项的坑——出题人对原文做了什么手脚，这个坑专骗哪种思路。
+第三段，直接说学生的理由错在哪一步：他如果是因为误读了哪个词、或者跳过了哪一步才选错的。
+
+不要写"希望你继续努力"这类结尾。`,
+    },
+  ]
+  return aiChat(messages, onDelta, { maxTokens: 900, temperature: 0.4 })
+}
+
+/** 学生追问某个选项：只针对一个选项往深里说 */
+async function aiAskAboutOption(paper, q, letter, question, history = [], onDelta) {
+  const passage = paper.paragraphs.map((p) => `[P${p.n}] ${p.text}`).join('\n\n')
+  const isRight = letter === q.answer
+  const flag = isRight ? '正确答案' : q.distractors[letter] || '错误选项'
+
+  const messages = [
+    {
+      role: 'system',
+      content: `你是考研英语阅读阅卷老师，学生正在追问一个选项。回答要具体、贴着原文，不要泛泛而谈。不许说"多读几遍就懂了"。用中文自然段落，最多 300 字。`,
+    },
+    {
+      role: 'user',
+      content: `文章：\n${passage}\n\n题目（第 ${q.num} 题）：${q.stem}\n\n选项 ${letter}：${q.options[letter]}（${flag}）\n正确答案是 ${q.answer}。\n\n学生问：「${question}」`,
+    },
+    ...history.slice(-6),
+  ]
+  return aiChat(messages, onDelta, { maxTokens: 600, temperature: 0.4 })
+}
+
+/** 整篇总结：这 5 题暴露了什么共性问题 */
+async function aiPaperSummary(paper, records, onDelta) {
+  const lines = paper.questions
+    .map((q, i) => {
+      const a = records[i]
+      if (!a) return ''
+      return `第 ${q.num} 题（${q.qtype}）：学生选 ${a.letter}，答案 ${q.answer}，${a.ok ? '对' : '错'}。他的理由：「${a.reason || '没写'}」`
+    })
+    .filter(Boolean)
+    .join('\n')
+
+  const messages = [
+    {
+      role: 'system',
+      content: `你是阅卷老师，正在做一个整体诊断。你要找出这个学生反复犯的同一个错误，而不是把 5 题各说一遍。用中文自然段落，最多 250 字。`,
+    },
+    {
+      role: 'user',
+      content: `这篇（${paper.year} 年英语一阅读 ${paper.part}，共 5 题）：\n\n${lines}\n\n请回答：他在这 5 题里反复出现的思维习惯问题是什么？举出第几题和第几题是同一个毛病。给一句可执行的改法。`,
+    },
+  ]
+  return aiChat(messages, onDelta, { maxTokens: 500, temperature: 0.4 })
+}
+
+/* ── 连通测试 ─────────────────────────────────────────── */
 
 async function aiPing() {
-  const r = await aiChat(
-    [{ role: 'user', content: '只回复两个字：通了' }],
-    null,
-    { maxTokens: 20, timeout: 20000 }
-  )
-  return r
+  return aiChat([{ role: 'user', content: '只回复两个字：通了' }], null, {
+    maxTokens: 20,
+    timeout: 25000,
+  })
 }
