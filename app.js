@@ -893,10 +893,14 @@ async function runDeepAnalyze(q, a, out, btn) {
       full = acc
       out.innerHTML = mdLite(acc)
     })
+    // 流式返回空的情况：别留一片空白让人不知道发生了啥
+    if (!full.trim()) {
+      throw new Error('AI 没产出内容。可能是模型把额度用在思考上了，再点一次试试。')
+    }
     S.reviewCache[q.num] = full
     btn.textContent = '重新拆一次'
   } catch (e) {
-    out.innerHTML = `<div class="ai-err">出错了：${esc(e.message)}</div>`
+    out.innerHTML = `<div class="ai-err">${esc(e.message)}</div>`
     btn.textContent = '重试'
   } finally {
     btn.disabled = false
@@ -947,6 +951,9 @@ function viewReviewDone() {
         full = acc
         out.innerHTML = mdLite(acc)
       })
+      if (!full.trim()) {
+        throw new Error('AI 没产出内容。可能是模型把额度用在思考上了，再点一次试试。')
+      }
       btn.textContent = '重新分析'
     } catch (e) {
       out.innerHTML = `<div class="ai-err">出错了：${esc(e.message)}</div>`
