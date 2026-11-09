@@ -70,7 +70,7 @@ async function aiChat(messages, onDelta, opts = {}) {
     model: cfg.model,
     messages,
     temperature: opts.temperature ?? cfg.temperature,
-    max_tokens: opts.maxTokens ?? 800,
+    max_tokens: opts.maxTokens ?? 2000,
     stream: !!onDelta,
   }
 
@@ -106,10 +106,28 @@ async function aiChat(messages, onDelta, opts = {}) {
     throw new Error(friendlyError(res.status, detail))
   }
 
+  // 非流式：检查 finish_reason，别把截断当成功。
+  // deepseek-flash 是推理模型，会先花几百 token 内部思考，额度不够就返回空。
   if (!onDelta) {
     clearTimeout(timer)
     const j = await res.json()
-    return j?.choices?.[0]?.message?.content?.trim() || ''
+    const ch = j?.choices?.[0]
+    const text = ch?.message?.content?.trim() || ''
+    const reasoning = j?.usage?.completion_tokens_details?.reasoning_tokens || 0
+
+    if (ch?.finish_reason === 'length') {
+      throw new Error(
+        `回复被截断（模型思考用掉 ${reasoning} token，额度不够）。把问题问得具体一点，或换 deepseek-v4-pro 再试。`
+      )
+    }
+    if (!text) {
+      throw new Error(
+        reasoning > 0
+          ? `模型把额度全用在推理上了（${reasoning} token），没产出正文。再试一次，或换 deepseek-v4-pro。`
+          : '接口返回了空内容，再试一次。'
+      )
+    }
+    return text
   }
 
   const reader = res.body.getReader()
@@ -202,7 +220,7 @@ async function aiPredictTopic(paper, step, said, history = [], onDelta) {
   ]
   if (said) messages.push({ role: 'user', content: `我的回答：${said}` })
 
-  return aiChat(messages, onDelta, { maxTokens: 400 })
+  return aiChat(messages, onDelta, { maxTokens: 1200 })
 }
 
 /** 学生写完"猜的主旨"后，让他先说，AI 只做诊断，不给答案（因为文章还没读） */
@@ -220,7 +238,7 @@ async function aiJudgeGuess(paper, guess, onDelta) {
       content: `题干：\n${stems}\n\n学生从题干推测的主旨：「${guess}」\n\n请说两件事：一、他这个推测是从题干里的哪些词推出来的（指出来）。二、读文章时他该重点验证什么。不超过 3 句话。`,
     },
   ]
-  return aiChat(messages, onDelta, { maxTokens: 350 })
+  return aiChat(messages, onDelta, { maxTokens: 1200 })
 }
 
 /* ══════════════════════════════════════════════════════
@@ -245,7 +263,7 @@ async function aiChallengeReason(paper, q, picked, reason, history = [], onDelta
     },
     ...history.slice(-4),
   ]
-  return aiChat(messages, onDelta, { maxTokens: 380 })
+  return aiChat(messages, onDelta, { maxTokens: 1400 })
 }
 
 /* ══════════════════════════════════════════════════════
@@ -305,7 +323,7 @@ async function aiDeepAnalyze(paper, q, ans, onDelta) {
 不要写"希望你继续努力"这类结尾。`,
     },
   ]
-  return aiChat(messages, onDelta, { maxTokens: 900, temperature: 0.4 })
+  return aiChat(messages, onDelta, { maxTokens: 3000, temperature: 0.4 })
 }
 
 /** 学生追问某个选项：只针对一个选项往深里说 */
@@ -325,7 +343,7 @@ async function aiAskAboutOption(paper, q, letter, question, history = [], onDelt
     },
     ...history.slice(-6),
   ]
-  return aiChat(messages, onDelta, { maxTokens: 600, temperature: 0.4 })
+  return aiChat(messages, onDelta, { maxTokens: 2000, temperature: 0.4 })
 }
 
 /** 整篇总结：这 5 题暴露了什么共性问题 */
@@ -349,14 +367,23 @@ async function aiPaperSummary(paper, records, onDelta) {
       content: `这篇（${paper.year} 年英语一阅读 ${paper.part}，共 5 题）：\n\n${lines}\n\n请回答：他在这 5 题里反复出现的思维习惯问题是什么？举出第几题和第几题是同一个毛病。给一句可执行的改法。`,
     },
   ]
-  return aiChat(messages, onDelta, { maxTokens: 500, temperature: 0.4 })
+  return aiChat(messages, onDelta, { maxTokens: 2000, temperature: 0.4 })
 }
 
 /* ── 连通测试 ─────────────────────────────────────────── */
 
+// 连通测试。deepseek-flash 是推理模型，光思考就要几十 token，
+// 所以这里给 300 而不是 20——否则会误报"没通"。
 async function aiPing() {
-  return aiChat([{ role: 'user', content: '只回复两个字：通了' }], null, {
-    maxTokens: 20,
-    timeout: 25000,
-  })
+  return aiChat(
+    [
+      {
+        role: 'system',
+        content: '你只需要回答。不要解释，不要思考过程，直接给结果。',
+      },
+      { role: 'user', content: '回复两个字：通了' },
+    ],
+    null,
+    { maxTokens: 300, timeout: 30000, temperature: 0 }
+  )
 }

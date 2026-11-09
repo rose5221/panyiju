@@ -24,7 +24,7 @@ const paper = papers.find((p) => p.questions.every((q) => q.locate)) || papers[0
 const q = paper.questions[0]
 const passage = paper.paragraphs.map((p) => `[P${p.n}] ${p.text}`).join('\n\n')
 
-async function call(messages, maxTokens = 600) {
+async function call(messages, maxTokens = 2000) {
   const res = await fetch(`${BASE}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${KEY}` },
@@ -32,7 +32,15 @@ async function call(messages, maxTokens = 600) {
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`)
   const j = await res.json()
-  return j?.choices?.[0]?.message?.content?.trim() || ''
+  const ch = j?.choices?.[0]
+  const txt = ch?.message?.content?.trim() || ''
+  const reason = j?.usage?.completion_tokens_details?.reasoning_tokens || 0
+  if (ch?.finish_reason === 'length') {
+    console.log(`  ⚠️ 被截断（思考用掉 ${reason} token）`)
+  } else if (!txt) {
+    console.log(`  ⚠️ 空回复（思考用掉 ${reason} token）`)
+  }
+  return txt
 }
 
 const hr = (t) => {
@@ -48,7 +56,7 @@ async function main() {
 
   hr('① 连通')
   const t0 = Date.now()
-  const pong = await call([{ role: 'user', content: '只回复两个字：通了' }], 20)
+  const pong = await call([{ role: 'user', content: '回复两个字：通了' }], 300)
   console.log(`${pong}  (${((Date.now() - t0) / 1000).toFixed(1)}s)`)
 
   if (!full) {
@@ -130,7 +138,7 @@ async function main() {
 不要写"希望你继续努力"这类结尾。`,
       },
     ],
-    900
+    3000
   )
   console.log(r4)
   console.log(`\n[${r4.length} 字]`)
@@ -157,7 +165,7 @@ async function main() {
         content: `文章：\n${passage}\n\n题目：${q.stem}\n\n选项 A：${q.options.A}（${q.answer === 'A' ? '正确答案' : q.distractors.A || '错误'}）\n正确答案是 ${q.answer}。\n\n学生问：「我就是觉得 A 也对啊，原文哪里排除了它？」`,
       },
     ],
-    600
+    2000
   )
   console.log(r5)
 
