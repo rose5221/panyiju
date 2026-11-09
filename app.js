@@ -308,7 +308,7 @@ function viewPassage() {
     <div class="step-tip-num">1</div>
     <div>
       <div class="step-tip-title">先通读，别做题</div>
-      <div class="step-tip-sub">读完跟着下面的四步走，走完再写主旨。</div>
+      <div class="step-tip-sub">读完跟着下面的四步走。选中文字就能划线做标记。</div>
     </div>
   `
   app.appendChild(tip)
@@ -319,10 +319,17 @@ function viewPassage() {
   for (const para of p.paragraphs) {
     const row = el('div', 'passage-para')
     row.dataset.para = para.n
-    row.innerHTML = `<span class="passage-no">${para.n}</span><span class="passage-txt">${esc(para.text)}</span>`
+    row.innerHTML = `<span class="passage-no">${para.n}</span><span class="passage-txt" data-mtext="${para.n}"></span>`
     card.appendChild(row)
   }
   app.appendChild(card)
+
+  // 划标记：选中文字就打线
+  enableMarking(card, p.id, p.paragraphs, () => {
+    const n = countMarks(p.id)
+    const el2 = $('#markCount')
+    if (el2) el2.textContent = n ? `已划 ${n} 处` : ''
+  })
 
   // 四步引导区
   const guide = el('div')
@@ -477,7 +484,19 @@ async function runAiMainIdea(step, said, card) {
 
 function renderIdeaInput(zone) {
   const ideaBox = el('div', 'card idea-card')
-  ideaBox.appendChild(el('h3', 'h-sec', '现在，一句话写出主旨'))
+
+  // 标题行：左边写主旨，右边告诉你划了几处
+  const head = el('div', 'row-between')
+  head.appendChild(el('h3', 'h-sec', '现在，一句话写出主旨'))
+  const cnt = el('span', 'mark-count')
+  cnt.id = 'markCount'
+  const refreshCnt = () => {
+    const n = countMarks(S.paper.id)
+    cnt.textContent = n ? `已划 ${n} 处` : ''
+  }
+  refreshCnt()
+  head.appendChild(cnt)
+  ideaBox.appendChild(head)
 
   // 把四步笔记摆出来，方便他合成
   const notes = el('div', 'mi-notes')
@@ -664,12 +683,14 @@ function openPassageDrawer(highlightPara) {
     const row = el('div', 'drawer-para')
     row.dataset.para = para.n
     if (highlightPara === para.n) row.classList.add('is-hit')
-    row.innerHTML = `<span class="drawer-no">${para.n}</span><span class="drawer-txt">${esc(para.text)}</span>`
+    row.innerHTML = `<span class="drawer-no">${para.n}</span><span class="drawer-txt" data-mtext="${para.n}"></span>`
     body.appendChild(row)
   }
 
   document.body.appendChild(d)
   document.body.style.overflow = 'hidden'
+  // 抽屉里也能划线，跟通读页共用同一份标记
+  enableMarking(body, p.id, p.paragraphs)
   requestAnimationFrame(() => d.classList.add('open'))
 
   const close = () => {
@@ -1149,6 +1170,21 @@ function finishQuiz() {
   b2.textContent = '回首页'
   b2.onclick = viewHome
   wrap.appendChild(b2)
+
+  // 这一篇的划线留着（下次重做还能看到），也可以主动清掉
+  const mc = countMarks(p.id)
+  if (mc) {
+    const b3 = el('button', 'btn btn-ghost btn-block mt-8')
+    b3.textContent = `清除这一篇的 ${mc} 处划线`
+    b3.onclick = () => {
+      if (!confirm(`清掉这篇的 ${mc} 处划线？`)) return
+      clearPaperMarks(p.id)
+      b3.remove()
+      toast('已清除')
+    }
+    wrap.appendChild(b3)
+  }
+
   app.appendChild(wrap)
 }
 
